@@ -66,6 +66,11 @@
       border: 1px solid #6ee7b7;
       color: #065f46;
     }
+    .warning {
+      background: #fffbeb;
+      border: 1px solid #fcd34d;
+      color: #92400e;
+    }
     .invalid {
       background: #fef2f2;
       border: 1px solid #fca5a5;
@@ -89,6 +94,12 @@
     }
     .store-link:hover {
       background: #047857;
+    }
+    .warning .store-link {
+      background: #b45309;
+    }
+    .warning .store-link:hover {
+      background: #92400e;
     }
   </style>
 </head>
@@ -138,8 +149,8 @@
           return;
         }
 
-        // Step 2: Check if the pass is publicly indexed (catches Private/Unpublished parent game 404s)
-        let isPubliclyListed = null;
+        // Step 2: Check public catalog index (hidden if parent game is Private OR 16+/17+ age-restricted)
+        let isPubliclyIndexed = null;
         if (creatorId) {
           try {
             const catUrl = `https://catalog.roproxy.com/v1/search/items?category=GamePass&creatorTargetId=${creatorId}&creatorType=${creatorType}&limit=100`;
@@ -147,7 +158,7 @@
             if (catRes.ok) {
               const catData = await catRes.json();
               if (Array.isArray(catData.data)) {
-                isPubliclyListed = catData.data.some(item => Number(item.id) === passId);
+                isPubliclyIndexed = catData.data.some(item => Number(item.id) === passId);
               }
             }
           } catch (_) {
@@ -155,12 +166,14 @@
           }
         }
 
-        if (isPubliclyListed === false) {
-          showResult('invalid', `
-            ❌ <b>404 / PRIVATE EXPERIENCE</b><br>
-            <b>Name:</b> ${name} (${price} Robux)<br>
-            The pass is on-sale, <b>but its parent game is Private or Unpublished</b> (which causes a 404 page).<br><br>
-            <b>Fix:</b> Open Creator Hub → publish the experience and set its visibility to <b>Public</b>.
+        if (isPubliclyIndexed === false) {
+          showResult('warning', `
+            ⚠️ <b>FOR SALE — CHECK STORE LINK FOR 404</b><br>
+            <b>Name:</b> ${name}<br>
+            <b>Price:</b> ${price} Robux<br>
+            <b>Creator:</b> ${creator}<br><br>
+            This pass is hidden from public search (either the parent game is <b>16+/17+ age-restricted</b> or set to <b>Private</b>). Click below while logged into Roblox to verify it loads:<br>
+            <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
           `);
           return;
         }
