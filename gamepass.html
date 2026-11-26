@@ -20,25 +20,10 @@
       padding: 24px;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
     }
-    .header-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-    }
     h2 {
-      margin: 0;
+      margin: 0 0 12px 0;
       font-size: 20px;
       color: #111827;
-    }
-    .badge {
-      background: #e6f4ea;
-      color: #137333;
-      font-size: 12px;
-      font-weight: 600;
-      padding: 4px 8px;
-      border-radius: 999px;
-      border: 1px solid #ceead6;
     }
     input, button {
       width: 100%;
@@ -91,14 +76,25 @@
       border: 1px solid #cbd5e1;
       color: #334155;
     }
+    .store-link {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 8px 12px;
+      background: #065f46;
+      color: #ffffff;
+      text-decoration: none;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .store-link:hover {
+      background: #047857;
+    }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="header-row">
-      <h2>Gamepass Checker</h2>
-      <span class="badge">v2.0 • Light</span>
-    </div>
+    <h2>Gamepass Checker</h2>
     <input type="text" id="input" placeholder="Paste Gamepass URL or ID..." />
     <button onclick="checkPass()">Verify Gamepass</button>
     <div id="result"></div>
@@ -107,7 +103,6 @@
   <script>
     async function checkPass() {
       const raw = document.getElementById('input').value.trim();
-      const resBox = document.getElementById('result');
       const match = raw.match(/(\d+)/);
 
       if (!match) {
@@ -115,38 +110,68 @@
         return;
       }
 
-      const passId = match[1];
-      showResult('loading', 'Checking Roblox API...');
+      const passId = Number(match[1]);
+      showResult('loading', 'Checking pass & public visibility...');
 
       try {
-        const url = `https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/product-info`;
-        const response = await fetch(url);
-
-        if (!response.ok) {
-          showResult('invalid', `❌ <b>Invalid / Not Found</b> (HTTP ${response.status})<br>Make sure it is a Gamepass ID/URL and not a Place, Shirt, or deleted pass.`);
+        // Step 1: Check basic Gamepass sale status
+        const infoRes = await fetch(`https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/product-info`);
+        if (!infoRes.ok) {
+          showResult('invalid', `❌ <b>Invalid / Not Found</b> (HTTP ${infoRes.status})<br>Make sure this is a Gamepass ID/URL and not a Place, Shirt, or deleted pass.`);
           return;
         }
 
-        const data = await response.json();
+        const data = await infoRes.json();
         const isForSale = Boolean(data.IsForSale ?? data.isForSale);
         const price = data.PriceInRobux ?? data.priceInRobux;
         const name = data.Name ?? data.name ?? 'Unknown';
         const creator = data.Creator?.Name ?? data.creator?.name ?? 'Unknown';
+        const creatorId = data.Creator?.Id ?? data.creator?.id;
+        const creatorType = (data.Creator?.CreatorType ?? data.creator?.creatorType ?? 'User') === 'Group' ? 2 : 1;
 
-        if (isForSale && price !== null && price !== undefined) {
-          showResult('valid', `
-            ✅ <b>VALID & PURCHASABLE</b><br>
-            <b>Name:</b> ${name}<br>
-            <b>Price:</b> ${price} Robux<br>
-            <b>Creator:</b> ${creator}
-          `);
-        } else {
+        if (!isForSale || price === null || price === undefined) {
           showResult('invalid', `
             ❌ <b>NOT FOR SALE (OFF-SALE)</b><br>
             <b>Name:</b> ${name}<br>
-            Tell the user to turn on "Item for Sale" and set a price.
+            Turn on <b>"Item for Sale"</b> and set a Robux price in Creator Hub.
           `);
+          return;
         }
+
+        // Step 2: Check if the pass is publicly indexed (catches Private/Unpublished parent game 404s)
+        let isPubliclyListed = null;
+        if (creatorId) {
+          try {
+            const catUrl = `https://catalog.roproxy.com/v1/search/items?category=GamePass&creatorTargetId=${creatorId}&creatorType=${creatorType}&limit=100`;
+            const catRes = await fetch(catUrl);
+            if (catRes.ok) {
+              const catData = await catRes.json();
+              if (Array.isArray(catData.data)) {
+                isPubliclyListed = catData.data.some(item => Number(item.id) === passId);
+              }
+            }
+          } catch (_) {
+            // Fallback if catalog search is rate-limited
+          }
+        }
+
+        if (isPubliclyListed === false) {
+          showResult('invalid', `
+            ❌ <b>404 / PRIVATE EXPERIENCE</b><br>
+            <b>Name:</b> ${name} (${price} Robux)<br>
+            The pass is on-sale, <b>but its parent game is Private or Unpublished</b> (which causes a 404 page).<br><br>
+            <b>Fix:</b> Open Creator Hub → publish the experience and set its visibility to <b>Public</b>.
+          `);
+          return;
+        }
+
+        showResult('valid', `
+          ✅ <b>VALID & PUBLICLY PURCHASABLE</b><br>
+          <b>Name:</b> ${name}<br>
+          <b>Price:</b> ${price} Robux<br>
+          <b>Creator:</b> ${creator}<br>
+          <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
+        `);
       } catch (err) {
         showResult('invalid', `⚠️ <b>Request Error:</b> ${err.message}`);
       }
