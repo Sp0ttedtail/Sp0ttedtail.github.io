@@ -57,13 +57,6 @@
       background: #94a3b8;
       cursor: not-allowed;
     }
-    button:focus-visible,
-    a:focus-visible,
-    summary:focus-visible {
-      outline: 2px solid #111827;
-      outline-offset: 2px;
-    }
-
     #result {
       margin-top: 16px;
       padding: 14px;
@@ -71,17 +64,11 @@
       display: none;
       line-height: 1.5;
       font-size: 14px;
-      overflow-wrap: anywhere;
     }
     .valid {
       background: #ecfdf5;
       border: 1px solid #6ee7b7;
       color: #065f46;
-    }
-    .warn {
-      background: #fffbeb;
-      border: 1px solid #fcd34d;
-      color: #92400e;
     }
     .invalid {
       background: #fef2f2;
@@ -92,22 +79,6 @@
       background: #f1f5f9;
       border: 1px solid #cbd5e1;
       color: #334155;
-    }
-    #result a:not(.store-link) {
-      color: inherit;
-      text-decoration: underline;
-    }
-    .why {
-      margin-top: 10px;
-      padding: 10px 12px;
-      background: #ffffff;
-      border-radius: 6px;
-      font-size: 13px;
-    }
-    .note {
-      margin-top: 8px;
-      font-size: 12px;
-      opacity: 0.85;
     }
     .store-link {
       display: inline-block;
@@ -123,279 +94,139 @@
     .store-link:hover {
       background: #047857;
     }
-    .warn .store-link {
-      background: #b45309;
-    }
-    .warn .store-link:hover {
-      background: #92400e;
-    }
-    details.tech {
-      margin-top: 12px;
+    .note {
+      margin-top: 8px;
       font-size: 12px;
-    }
-    details.tech summary {
-      cursor: pointer;
-    }
-    details.tech pre {
-      margin: 6px 0 0;
-      padding: 8px;
-      background: rgba(255, 255, 255, 0.7);
-      border-radius: 6px;
-      white-space: pre-wrap;
-      word-break: break-word;
+      color: #047857;
     }
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>Gamepass Checker</h2>
-    <input type="text" id="input" placeholder="Paste Gamepass URL or ID..." autocomplete="off" autocapitalize="off" spellcheck="false" />
-    <button id="checkBtn" type="button">Verify Gamepass</button>
-    <div id="result" role="status" aria-live="polite"></div>
+    <h2>Roblox Gamepass Checker</h2>
+    <input type="text" id="input" placeholder="Paste Gamepass URL or ID..." />
+    <button id="checkBtn" onclick="checkPass()">Verify Gamepass</button>
+    <div id="result"></div>
   </div>
 
   <script>
-  (() => {
-    'use strict';
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    const API = 'https://apis.roproxy.com';
-    const GAMES = 'https://games.roproxy.com';
-
-    // Roblox puts a placeholder in the title field when the caller isn't allowed to see an
-    // experience (age-restricted, moderated, etc.). This page calls Roblox logged out, so any
-    // restricted experience comes back with one of these instead of its real title.
-    const HIDDEN_TITLE = /^\[?\s*(title\s+unavailable|content\s+deleted)\s*\]?$/i;
-
-    const input = document.getElementById('input');
-    const btn = document.getElementById('checkBtn');
-    const resBox = document.getElementById('result');
-
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const pick = (...vals) => vals.find((v) => v !== undefined && v !== null);
-    const toId = (v) => {
-      const n = Number(v);
-      return Number.isSafeInteger(n) && n > 0 ? n : null;
-    };
-    // Gamepass names and creator names are user-controlled, so never put them in innerHTML raw.
-    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[c]));
-
-    function showResult(state, html) {
-      resBox.style.display = 'block';
-      resBox.className = state;
-      resBox.innerHTML = html;
-    }
-    const setStatus = (text) => showResult('loading', esc(text));
-
-    // GET + JSON with a timeout and retries for rate limits / proxy hiccups.
-    async function getJson(url, label, retries = 4) {
-      let last = { ok: false, status: 0, data: null };
+    async function fetchWithRetry(url, statusLabel, retries = 5) {
       for (let attempt = 0; attempt <= retries; attempt++) {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 12000);
         try {
-          const res = await fetch(url, { signal: ctrl.signal });
-          let data = null;
-          try { data = await res.json(); } catch (_) { /* body wasn't JSON */ }
-          last = { ok: res.ok, status: res.status, data };
-          if (![429, 502, 503, 504].includes(res.status)) return last;
-        } catch (_) {
-          last = { ok: false, status: 0, data: null };
-        } finally {
-          clearTimeout(timer);
+          const res = await fetch(url);
+          if (res.status !== 429 && res.status !== 502 && res.status !== 503) {
+            return res;
+          }
+          if (attempt === retries) return res;
+        } catch (err) {
+          if (attempt === retries) throw err;
         }
-        if (attempt < retries) {
-          const waitMs = 1500 * (attempt + 1) + Math.random() * 500;
-          setStatus(`Roblox’s proxy is busy while ${label}. Retrying in ${Math.round(waitMs / 1000)}s (${attempt + 1}/${retries})…`);
-          await sleep(waitMs);
-        }
+
+        const waitMs = 2000 * (attempt + 1);
+        showResult('loading', `⏳ Rate limited while ${statusLabel} — waiting ${(waitMs / 1000).toFixed(0)}s and retrying (${attempt + 1}/${retries})...`);
+        await sleep(waitMs);
       }
-      return last;
-    }
-
-    function parsePassId(raw) {
-      const text = raw.trim();
-      const fromUrl = text.match(/game-?pass(?:es)?\/(\d+)/i);
-      if (fromUrl) return { id: Number(fromUrl[1]) };
-      if (/roblox\.com\//i.test(text)) return { notPass: true }; // a games/catalog/etc. link
-      const digits = text.match(/\d+/);
-      return digits ? { id: Number(digits[0]) } : null;
-    }
-
-    function explainFailure(...codes) {
-      if (codes.some((c) => c === 400 || c === 404)) {
-        return ['invalid', '❌ <b>Invalid / not found</b><br>Make sure this is a gamepass ID or URL, not a place, shirt or deleted pass.'];
-      }
-      if (codes.includes(429)) {
-        return ['invalid', '⚠️ <b>Rate limited</b><br>RoProxy is busy. Wait a few seconds and try again.'];
-      }
-      const http = codes.find((c) => c > 0);
-      return ['invalid', `⚠️ <b>Network / proxy error</b>${http ? ` (HTTP ${http})` : ''}<br>RoProxy may be temporarily down. Wait a few seconds and try again.`];
-    }
-
-    // placeId (from the gamepass) -> universeId -> experience details.
-    // state: visible | hidden | missing | unknown
-    async function lookupExperience(placeId) {
-      const exp = { placeId, universeId: null, apiTitle: null, title: null, state: 'unknown' };
-
-      const uni = await getJson(`${API}/universes/v1/places/${placeId}/universe`, 'finding the experience', 3);
-      if (uni.status === 400 || uni.status === 404) { exp.state = 'missing'; return exp; }
-      exp.universeId = uni.ok ? toId(uni.data?.universeId) : null;
-      if (!exp.universeId) return exp;
-
-      const g = await getJson(`${GAMES}/v1/games?universeIds=${exp.universeId}`, 'reading the experience', 3);
-      if (!g.ok) return exp;
-
-      const row = Array.isArray(g.data?.data) ? g.data.data[0] : null;
-      if (!row) { exp.state = 'missing'; return exp; }
-
-      exp.apiTitle = String(row.name ?? '').trim();
-      if (!exp.apiTitle || HIDDEN_TITLE.test(exp.apiTitle)) {
-        exp.state = 'hidden';
-      } else {
-        exp.state = 'visible';
-        exp.title = exp.apiTitle;
-      }
-      return exp;
-    }
-
-    function renderOnSale({ passId, name, creator, price, exp }) {
-      const storeUrl = `https://www.roblox.com/game-pass/${passId}`;
-      const expUrl = exp.placeId ? `https://www.roblox.com/games/${exp.placeId}` : null;
-      const openExp = expUrl ? `<a href="${expUrl}" target="_blank" rel="noopener">open experience</a>` : '';
-
-      let state = 'valid';
-      let heading = '✅ <b>ON-SALE &amp; VALID</b>';
-      let usedIn = '';
-      let extra = '';
-
-      switch (exp.state) {
-        case 'visible':
-          usedIn = `<b>Use this pass in:</b> <a href="${expUrl}" target="_blank" rel="noopener">${esc(exp.title)}</a><br>`;
-          break;
-
-        case 'hidden':
-          state = 'warn';
-          heading = '⚠️ <b>VALID — EXPERIENCE TITLE HIDDEN BY ROBLOX</b>';
-          usedIn = `<b>Use this pass in:</b> Hidden by Roblox (${openExp})<br>`;
-          extra = `<div class="why"><b>Why:</b> Roblox shows a “[TITLE UNAVAILABLE]” placeholder instead of the real title when an experience is age-restricted (16+/17+) or otherwise hidden from logged-out viewers. This checker is logged out, so it can’t read the title. The pass itself is on sale. Accounts that meet the age requirement can usually buy it; others may see a 404 on the store page.</div>`;
-          break;
-
-        case 'missing':
-          state = 'warn';
-          heading = '⚠️ <b>VALID — EXPERIENCE NOT PUBLIC</b>';
-          usedIn = `<b>Use this pass in:</b> Place ${exp.placeId} (${openExp})<br>`;
-          extra = `<div class="why"><b>Why:</b> Roblox returned no public details for this experience, so it’s probably private, unpublished or removed. The store page will likely 404 for everyone except its owner and collaborators. If it’s your experience, set it to Public in Creator Hub.</div>`;
-          break;
-
-        case 'unknown':
-          heading = '✅ <b>ON-SALE</b> (experience not checked)';
-          usedIn = `<b>Use this pass in:</b> Couldn’t load (${openExp})<br>`;
-          extra = '<div class="note">Couldn’t read the experience details this time. The proxy may be busy; run the check again.</div>';
-          break;
-
-        default: // 'none': the gamepass response had no place ID
-          heading = '✅ <b>ON-SALE</b> (experience not checked)';
-          extra = '<div class="note">Roblox didn’t say which experience this pass belongs to, so the experience wasn’t checked.</div>';
-      }
-
-      const tech = JSON.stringify({
-        gamePassId: passId,
-        placeId: exp.placeId ?? null,
-        universeId: exp.universeId ?? null,
-        titleFromApi: exp.apiTitle ?? null,
-        experience: exp.state
-      }, null, 2);
-
-      showResult(state, `
-        ${heading}<br>
-        <b>Name:</b> ${esc(name)}<br>
-        <b>Price:</b> ${price === null ? 'Unknown' : esc(price) + ' Robux'}<br>
-        <b>Creator:</b> ${esc(creator)}<br>
-        ${usedIn}
-        ${extra}
-        <a class="store-link" href="${storeUrl}" target="_blank" rel="noopener">Open Store Page →</a>
-        <details class="tech"><summary>Technical details</summary><pre>${esc(tech)}</pre></details>
-      `);
     }
 
     async function checkPass() {
-      if (btn.disabled) return;
+      const raw = document.getElementById('input').value.trim();
+      const btn = document.getElementById('checkBtn');
+      const match = raw.match(/(\d+)/);
 
-      const parsed = parsePassId(input.value);
-      if (!parsed) {
-        showResult('invalid', 'Enter a gamepass ID or URL, like <b>roblox.com/game-pass/123456</b>.');
-        return;
-      }
-      if (parsed.notPass) {
-        showResult('invalid', 'That link isn’t a gamepass. A gamepass link contains <b>/game-pass/</b> followed by a number.');
-        return;
-      }
-      const passId = toId(parsed.id);
-      if (!passId) {
-        showResult('invalid', 'That ID isn’t valid. Enter a gamepass ID or URL.');
+      if (!match) {
+        showResult('invalid', "Invalid input. Enter a Gamepass ID or URL.");
         return;
       }
 
+      const passId = Number(match[1]);
       btn.disabled = true;
-      setStatus('Checking gamepass…');
+      showResult('loading', 'Checking Gamepass...');
 
       try {
-        // /details has the place ID and price info; /product-info has the creator.
-        const [det, prod] = await Promise.all([
-          getJson(`${API}/game-passes/v1/game-passes/${passId}/details`, 'loading the gamepass'),
-          getJson(`${API}/game-passes/v1/game-passes/${passId}/product-info`, 'loading the creator')
-        ]);
-        const d = det.ok ? det.data : null;
-        const p = prod.ok ? prod.data : null;
+        let data = null;
+        let universeId = null;
 
-        if (!d && !p) {
-          const [state, html] = explainFailure(det.status, prod.status);
-          showResult(state, html);
-          return;
+        const detailsRes = await fetchWithRetry(
+          `https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/details`,
+          'fetching gamepass details'
+        );
+
+        if (detailsRes.ok) {
+          data = await detailsRes.json();
+          universeId = data.universeId ?? data.UniverseId ?? null;
+        } else {
+          const infoRes = await fetchWithRetry(
+            `https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/product-info`,
+            'fetching gamepass product-info'
+          );
+          if (!infoRes.ok) {
+            showResult('invalid', `❌ <b>Invalid / Not Found</b> (HTTP ${infoRes.status})<br>Make sure this is a Gamepass ID/URL and not a Place, Shirt, or deleted pass.`);
+            return;
+          }
+          data = await infoRes.json();
+          universeId = data.TargetId ?? data.UniverseId ?? data.universeId ?? null;
         }
 
-        const name = pick(d?.name, p?.Name) ?? 'Unknown';
-        const creator = pick(p?.Creator?.Name, d?.creator?.name) ?? 'Unknown';
-        // Roblox moved the price into priceInformation (it can be null when off-sale).
-        const price = pick(d?.priceInformation?.defaultPriceInRobux, d?.price, p?.PriceInRobux) ?? null;
-        const forSale = pick(d?.isForSale, p?.IsForSale);
-        // If the flag is missing entirely, fall back to "has a price".
-        const onSale = forSale === undefined ? price !== null : Boolean(forSale);
+        const isForSale = Boolean(data.isForSale ?? data.IsForSale);
+        const price = data.price ?? data.PriceInRobux ?? data.priceInRobux;
+        const name = data.name ?? data.Name ?? 'Unknown';
+        const creator = data.creator?.name ?? data.Creator?.Name ?? 'Unknown';
 
-        if (!onSale) {
+        if (!isForSale || price === null || price === undefined) {
           showResult('invalid', `
             ❌ <b>NOT FOR SALE (OFF-SALE)</b><br>
-            <b>Name:</b> ${esc(name)}<br>
-            <b>Creator:</b> ${esc(creator)}<br>
-            Turn on <b>“Item for Sale”</b> and set a Robux price in Creator Hub.
+            <b>Name:</b> ${name}<br>
+            Turn on <b>"Item for Sale"</b> and set a Robux price in Creator Hub.
           `);
           return;
         }
 
-        const placeId = toId(d?.placeId);
-        let exp;
-        if (placeId) {
-          setStatus('Checking the experience…');
-          exp = await lookupExperience(placeId);
-        } else {
-          exp = { placeId: null, universeId: null, apiTitle: null, title: null, state: 'none' };
+        let gameLabel = null;
+        if (universeId) {
+          showResult('loading', 'Checking attached experience...');
+          try {
+            const gameRes = await fetchWithRetry(
+              `https://games.roproxy.com/v1/games?universeIds=${universeId}`,
+              'checking attached experience',
+              3
+            );
+            if (gameRes.ok) {
+              const gameData = await gameRes.json();
+              const rawTitle = (gameData.data?.[0]?.name || '').trim();
+              if (rawTitle && rawTitle !== '[TITLE UNAVAILABLE]' && rawTitle !== '[ Content Deleted ]') {
+                gameLabel = rawTitle;
+              } else if (rawTitle === '[TITLE UNAVAILABLE]') {
+                gameLabel = 'Hidden by Roblox';
+              }
+            }
+          } catch (_) {}
         }
 
-        renderOnSale({ passId, name, creator, price, exp });
+        const gameLine = gameLabel ? `<br><b>Use this Pass in:</b> ${gameLabel}` : '';
+
+        showResult('valid', `
+          ✅ <b>ON-SALE & VALID</b><br>
+          <b>Name:</b> ${name}<br>
+          <b>Price:</b> ${price} Robux<br>
+          <b>Creator:</b> ${creator}${gameLine}<br>
+          <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
+          <div class="note">If the store page returns a 404, the creator's parent experience is set to Private.</div>
+        `);
       } catch (err) {
-        showResult('invalid', `⚠️ <b>Something went wrong:</b> ${esc(err && err.message ? err.message : err)}<br>Wait a few seconds and try again.`);
+        showResult('invalid', `⚠️ <b>Network / Proxy Error:</b> ${err.message}<br>RoProxy may be temporarily overloaded—wait a few seconds and try again.`);
       } finally {
         btn.disabled = false;
       }
     }
 
-    btn.addEventListener('click', checkPass);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') checkPass();
-    });
-  })();
+    function showResult(state, html) {
+      const resBox = document.getElementById('result');
+      resBox.style.display = 'block';
+      resBox.className = state;
+      resBox.innerHTML = html;
+    }
   </script>
 </body>
 </html>
