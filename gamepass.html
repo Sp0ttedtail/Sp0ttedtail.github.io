@@ -116,7 +116,7 @@
 </head>
 <body>
   <div class="card">
-    <h2>Gamepass Checker</h2>
+    <h2>Roblox Gamepass Checker</h2>
     <input type="text" id="input" placeholder="Paste Gamepass URL or ID..." />
     <button id="checkBtn" onclick="checkPass()">Verify Gamepass</button>
     <div id="result"></div>
@@ -125,15 +125,21 @@
   <script>
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // Automatically waits and retries on HTTP 429 rate limits
-    async function fetchWithRetry(url, statusLabel, retries = 4) {
+    // Retries both HTTP 429 responses AND thrown network/CORS errors caused by proxy throttling
+    async function fetchWithRetry(url, statusLabel, retries = 5) {
       for (let attempt = 0; attempt <= retries; attempt++) {
-        const res = await fetch(url);
-        if (res.status !== 429) return res;
-        if (attempt === retries) return res;
+        try {
+          const res = await fetch(url);
+          if (res.status !== 429 && res.status !== 502 && res.status !== 503) {
+            return res;
+          }
+          if (attempt === retries) return res;
+        } catch (err) {
+          if (attempt === retries) throw err;
+        }
 
-        const waitMs = 1500 * (attempt + 1);
-        showResult('loading', `⏳ Rate limited while ${statusLabel} — waiting ${(waitMs / 1000).toFixed(1)}s and retrying (${attempt + 1}/${retries})...`);
+        const waitMs = 2000 * (attempt + 1);
+        showResult('loading', `⏳ Rate limited while ${statusLabel} — waiting ${(waitMs / 1000).toFixed(0)}s and retrying (${attempt + 1}/${retries})...`);
         await sleep(waitMs);
       }
     }
@@ -150,27 +156,41 @@
 
       const passId = Number(match[1]);
       btn.disabled = true;
-      showResult('loading', 'Checking Gamepass info...');
+      showResult('loading', 'Checking Gamepass details...');
 
       try {
-        // Step 1: Fetch Gamepass product-info
-        const infoRes = await fetchWithRetry(
-          `https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/product-info`,
-          'fetching pass info'
+        // Step 1: Fetch /details (returns universeId, price, isForSale, name, creator in ONE call)
+        let data = null;
+        let universeId = null;
+
+        const detailsRes = await fetchWithRetry(
+          `https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/details`,
+          'fetching gamepass details'
         );
 
-        if (!infoRes.ok) {
-          showResult('invalid', `❌ <b>Invalid / Not Found</b> (HTTP ${infoRes.status})<br>Make sure this is a Gamepass ID/URL and not a Place, Shirt, or deleted pass.`);
-          return;
+        if (detailsRes.ok) {
+          data = await detailsRes.json();
+          universeId = data.universeId ?? data.UniverseId ?? null;
+        } else {
+          // Fallback to product-info if /details returns 404/400
+          const infoRes = await fetchWithRetry(
+            `https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/product-info`,
+            'fetching gamepass product-info'
+          );
+          if (!infoRes.ok) {
+            showResult('invalid', `❌ <b>Invalid / Not Found</b> (HTTP ${infoRes.status})<br>Make sure this is a Gamepass ID/URL and not a Place, Shirt, or deleted pass.`);
+            return;
+          }
+          data = await infoRes.json();
+          universeId = data.TargetId ?? data.UniverseId ?? data.universeId ?? null;
         }
 
-        const data = await infoRes.json();
-        const isForSale = Boolean(data.IsForSale ?? data.isForSale);
-        const price = data.PriceInRobux ?? data.priceInRobux;
-        const name = data.Name ?? data.name ?? 'Unknown';
-        const creator = data.Creator?.Name ?? data.creator?.name ?? 'Unknown';
-        const creatorId = data.Creator?.Id ?? data.creator?.id;
-        const isGroup = (data.Creator?.CreatorType ?? data.creator?.creatorType ?? 'User') === 'Group';
+        const isForSale = Boolean(data.isForSale ?? data.IsForSale);
+        const price = data.price ?? data.PriceInRobux ?? data.priceInRobux;
+        const name = data.name ?? data.Name ?? 'Unknown';
+        const creator = data.creator?.name ?? data.Creator?.Name ?? 'Unknown';
+        const creatorId = data.creator?.id ?? data.Creator?.Id;
+        const isGroup = (data.creator?.creatorType ?? data.Creator?.CreatorType ?? 'User') === 'Group';
         const creatorType = isGroup ? 2 : 1;
 
         if (!isForSale || price === null || price === undefined) {
@@ -182,108 +202,101 @@
           return;
         }
 
-        // Step 2: Check public catalog index (fast check for All Ages / 9+ / 13+ public games)
-        showResult('loading', 'Checking public catalog visibility...');
-        let isPubliclyIndexed = null;
-        if (creatorId) {
-          const catUrl = `https://catalog.roproxy.com/v1/search/items?category=GamePass&creatorTargetId=${creatorId}&creatorType=${creatorType}&limit=100`;
-          const catRes = await fetchWithRetry(catUrl, 'checking public catalog');
-          if (catRes.ok) {
-            const catData = await catRes.json();
-            if (Array.isArray(catData.data)) {
-              isPubliclyIndexed = catData.data.some(item => Number(item.id) === passId);
-            }
-          }
-        }
+        // Step 2: Directly check the parent experience using universeId (no scanning!)
+        let gameInfo = null;
+        let gameIsPrivate = false;
 
-        // Step 3: Find the exact parent experience ("Use this Pass in: [Game]")
-        // First check economy asset details, then scan creator's public universes sequentially (avoids burst 429s)
-        showResult('loading', 'Finding parent experience ("Use this Pass in...")...');
-        let matchedGame = null;
-        let scannedPublicGames = false;
-
-        // 3a: Try economy/v2/assets/{id}/details for direct place/universe link
-        try {
-          const econRes = await fetchWithRetry(
-            `https://economy.roproxy.com/v2/assets/${passId}/details`,
-            'checking parent experience link'
+        if (universeId) {
+          showResult('loading', 'Checking parent experience visibility...');
+          const gameRes = await fetchWithRetry(
+            `https://games.roproxy.com/v1/games?universeIds=${universeId}`,
+            'checking parent experience'
           );
-          if (econRes.ok) {
-            const econData = await econRes.json();
-            const placeId = econData.PlaceId ?? econData.TargetId ?? null;
-            if (placeId) {
-              const placeRes = await fetchWithRetry(
-                `https://games.roproxy.com/v1/games/multiget-place-details?placeIds=${placeId}`,
-                'checking place visibility'
-              );
-              if (placeRes.ok) {
-                const placeArr = await placeRes.json();
-                if (Array.isArray(placeArr) && placeArr.length > 0) {
-                  matchedGame = {
-                    id: placeArr[0].universeId,
-                    name: placeArr[0].name,
-                    isPlayable: placeArr[0].isPlayable,
-                    reasonProhibited: placeArr[0].reasonProhibited
-                  };
-                }
-              }
-            }
-          }
-        } catch (_) {}
-
-        // 3b: If economy endpoint didn't expose PlaceId, scan creator's public games one-by-one (no burst rate limits)
-        if (!matchedGame && creatorId) {
-          const gamesEndpoint = isGroup
-            ? `https://games.roproxy.com/v2/groups/${creatorId}/games?accessFilter=Public&limit=50`
-            : `https://games.roproxy.com/v2/users/${creatorId}/games?accessFilter=Public&limit=50`;
-
-          const gamesRes = await fetchWithRetry(gamesEndpoint, 'loading creator experiences');
-          if (gamesRes.ok) {
-            const gamesData = await gamesRes.json();
-            const publicGames = Array.isArray(gamesData.data) ? gamesData.data : [];
-            scannedPublicGames = true;
-
-            for (let i = 0; i < publicGames.length; i++) {
-              const game = publicGames[i];
-              showResult('loading', `Scanning ${creator}'s experiences (${i + 1}/${publicGames.length}): ${game.name}...`);
-              const gpRes = await fetchWithRetry(
-                `https://apis.roproxy.com/game-passes/v1/universes/${game.id}/game-passes?passView=Full&pageSize=100`,
-                `checking "${game.name}"`
-              );
-              if (gpRes.ok) {
-                const gpData = await gpRes.json();
-                const list = gpData.gamePasses || gpData.data || [];
-                if (list.some(gp => Number(gp.id ?? gp.gamePassId) === passId)) {
-                  matchedGame = { id: game.id, name: game.name, isPlayable: true };
-                  break;
-                }
-              }
+          if (gameRes.ok) {
+            const gameData = await gameRes.json();
+            if (Array.isArray(gameData.data) && gameData.data.length > 0) {
+              gameInfo = gameData.data[0];
+            } else {
+              // Empty array for a known universeId means the experience is Private
+              gameIsPrivate = true;
             }
           }
         }
 
-        const gameLine = matchedGame ? `<br><b>Use this Pass in:</b> ${matchedGame.name}` : '';
-
-        // Outcome 1: Found in a Public experience AND visible in public catalog -> Standard Public Pass
-        if (isPubliclyIndexed === true) {
-          showResult('valid', `
-            ✅ <b>VALID & PUBLICLY PURCHASABLE</b><br>
-            <b>Name:</b> ${name}<br>
-            <b>Price:</b> ${price} Robux<br>
-            <b>Creator:</b> ${creator}${gameLine}<br>
-            <b>Status:</b> Public • Standard Age Rating<br>
-            <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
+        if (gameIsPrivate) {
+          showResult('invalid', `
+            ❌ <b>404 — PARENT EXPERIENCE IS PRIVATE</b><br>
+            <b>Name:</b> ${name} (${price} Robux)<br>
+            <b>Creator:</b> ${creator}
+            <div class="reason-box">
+              <b>What happened:</b> The pass is set to On-Sale, <b>but its parent experience (Universe ${universeId}) is Private or Unpublished</b>, which causes a 404 Page Not Found.<br><br>
+              <b>Fix:</b> Open Creator Hub → publish the experience and set its visibility to <b>Public</b>.
+            </div>
           `);
           return;
         }
 
-        // Outcome 2: Found in a Public experience, but hidden from catalog -> 16+/17+ Age-Restricted Experience
-        if (matchedGame && matchedGame.isPlayable !== false) {
+        // Step 3: Check public catalog index to see if Roblox hides it due to 16+/17+ age rating
+        let isPubliclyIndexed = null;
+        if (creatorId) {
+          showResult('loading', 'Checking age rating & catalog visibility...');
+          try {
+            const catUrl = `https://catalog.roproxy.com/v1/search/items?category=GamePass&creatorTargetId=${creatorId}&creatorType=${creatorType}&limit=100`;
+            const catRes = await fetchWithRetry(catUrl, 'checking age rating visibility', 2);
+            if (catRes.ok) {
+              const catData = await catRes.json();
+              if (Array.isArray(catData.data)) {
+                isPubliclyIndexed = catData.data.some(item => Number(item.id) === passId);
+              }
+            }
+          } catch (_) {
+            // Optional check; ignore if catalog search is throttled
+          }
+        }
+
+        const gameLine = gameInfo?.name ? `<br><b>Use this Pass in:</b> ${gameInfo.name}` : '';
+
+        // Public game + hidden from unauthenticated catalog = 16+/17+ Maturity Rating
+        if (gameInfo && isPubliclyIndexed === false) {
           showResult('warning', `
             ⚠️ <b>VALID — 16+/17+ AGE-RESTRICTED EXPERIENCE</b><br>
             <b>Name:</b> ${name}<br>
             <b>Price:</b> ${price} Robux<br>
             <b>Creator:</b> ${creator}${gameLine}
+            <div class="reason-box">
+              <b>What happened:</b> The pass is <b>On-Sale</b> and its experience (<b>${gameInfo.name}</b>) is <b>Public</b>, but Roblox hides it from unauthenticated catalog search because the experience is rated <b>16+ or 17+</b>. Age-verified accounts can buy it normally; under-16 accounts will see a 404.
+            </div>
+            <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
+          `);
+          return;
+        }
+
+        // Valid & Public (including large creators like Nosniy Games whose catalog exceeds 100 passes)
+        showResult('valid', `
+          ✅ <b>VALID & PUBLICLY PURCHASABLE</b><br>
+          <b>Name:</b> ${name}<br>
+          <b>Price:</b> ${price} Robux<br>
+          <b>Creator:</b> ${creator}${gameLine}<br>
+          <b>Status:</b> Public Experience<br>
+          <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
+        `);
+      } catch (err) {
+        showResult('invalid', `⚠️ <b>Network / Proxy Error:</b> ${err.message}<br>RoProxy may be temporarily overloaded—wait a few seconds and try again.`);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function showResult(state, html) {
+      const resBox = document.getElementById('result');
+      resBox.style.display = 'block';
+      resBox.className = state;
+      resBox.innerHTML = html;
+    }
+  </script>
+</body>
+</html>
+>Creator:</b> ${creator}${gameLine}
             <div class="reason-box">
               <b>What happened:</b> The pass is <b>On-Sale</b> and its experience (<b>${matchedGame.name}</b>) is <b>Public</b>, but Roblox hides it from public catalog search because the experience is rated <b>16+ or 17+</b>. Age-verified accounts can buy it normally; under-16 accounts will see a 404.
             </div>
