@@ -101,6 +101,13 @@
     .warning .store-link:hover {
       background: #92400e;
     }
+    .reason-box {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.65);
+      border-radius: 6px;
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -122,10 +129,10 @@
       }
 
       const passId = Number(match[1]);
-      showResult('loading', 'Checking pass & public visibility...');
+      showResult('loading', 'Checking Gamepass, parent experience & age rating...');
 
       try {
-        // Step 1: Check basic Gamepass sale status
+        // Step 1: Fetch basic Gamepass info
         const infoRes = await fetch(`https://apis.roproxy.com/game-passes/v1/game-passes/${passId}/product-info`);
         if (!infoRes.ok) {
           showResult('invalid', `❌ <b>Invalid / Not Found</b> (HTTP ${infoRes.status})<br>Make sure this is a Gamepass ID/URL and not a Place, Shirt, or deleted pass.`);
@@ -138,7 +145,8 @@
         const name = data.Name ?? data.name ?? 'Unknown';
         const creator = data.Creator?.Name ?? data.creator?.name ?? 'Unknown';
         const creatorId = data.Creator?.Id ?? data.creator?.id;
-        const creatorType = (data.Creator?.CreatorType ?? data.creator?.creatorType ?? 'User') === 'Group' ? 2 : 1;
+        const isGroup = (data.Creator?.CreatorType ?? data.creator?.creatorType ?? 'User') === 'Group';
+        const creatorType = isGroup ? 2 : 1;
 
         if (!isForSale || price === null || price === undefined) {
           showResult('invalid', `
@@ -149,7 +157,7 @@
           return;
         }
 
-        // Step 2: Check public catalog index (hidden if parent game is Private OR 16+/17+ age-restricted)
+        // Step 2: Check public catalog index (fast path for standard All Ages / 9+ / 13+ games)
         let isPubliclyIndexed = null;
         if (creatorId) {
           try {
@@ -161,28 +169,94 @@
                 isPubliclyIndexed = catData.data.some(item => Number(item.id) === passId);
               }
             }
-          } catch (_) {
-            // Fallback if catalog search is rate-limited
-          }
+          } catch (_) {}
         }
 
-        if (isPubliclyIndexed === false) {
-          showResult('warning', `
-            ⚠️ <b>FOR SALE — CHECK STORE LINK FOR 404</b><br>
+        if (isPubliclyIndexed === true) {
+          showResult('valid', `
+            ✅ <b>VALID & PUBLICLY PURCHASABLE</b><br>
             <b>Name:</b> ${name}<br>
             <b>Price:</b> ${price} Robux<br>
-            <b>Creator:</b> ${creator}<br><br>
-            This pass is hidden from public search (either the parent game is <b>16+/17+ age-restricted</b> or set to <b>Private</b>). Click below while logged into Roblox to verify it loads:<br>
+            <b>Creator:</b> ${creator}<br>
+            <b>Visibility:</b> Public • Standard Age Rating<br>
             <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
           `);
           return;
         }
 
-        showResult('valid', `
-          ✅ <b>VALID & PUBLICLY PURCHASABLE</b><br>
+        // Step 3: If hidden from catalog, scan the creator's public games to separate Private vs 16+/17+
+        let matchedGame = null;
+        let scannedPublicGames = false;
+
+        if (creatorId) {
+          try {
+            const gamesEndpoint = isGroup
+              ? `https://games.roproxy.com/v2/groups/${creatorId}/games?accessFilter=Public&limit=50`
+              : `https://games.roproxy.com/v2/users/${creatorId}/games?accessFilter=Public&limit=50`;
+
+            const gamesRes = await fetch(gamesEndpoint);
+            if (gamesRes.ok) {
+              const gamesData = await gamesRes.json();
+              const publicGames = Array.isArray(gamesData.data) ? gamesData.data : [];
+              scannedPublicGames = true;
+
+              // Check each public experience's gamepasses in parallel
+              await Promise.all(publicGames.map(async (game) => {
+                if (matchedGame) return;
+                try {
+                  const gpRes = await fetch(`https://apis.roproxy.com/game-passes/v1/universes/${game.id}/game-passes?passView=Full&pageSize=100`);
+                  if (gpRes.ok) {
+                    const gpData = await gpRes.json();
+                    const list = gpData.gamePasses || gpData.data || [];
+                    if (list.some(gp => Number(gp.id ?? gp.gamePassId) === passId)) {
+                      matchedGame = game;
+                    }
+                  }
+                } catch (_) {}
+              }));
+            }
+          } catch (_) {}
+        }
+
+        // Found inside one of the creator's Public games -> Public 16+/17+ Experience
+        if (matchedGame) {
+          showResult('warning', `
+            ⚠️ <b>VALID — 16+/17+ AGE-RESTRICTED EXPERIENCE</b><br>
+            <b>Name:</b> ${name}<br>
+            <b>Price:</b> ${price} Robux<br>
+            <b>Creator:</b> ${creator}<br>
+            <b>Experience:</b> Public (${matchedGame.name})
+            <div class="reason-box">
+              <b>What happened:</b> The pass is <b>On-Sale</b> and its parent experience is <b>Public</b>, but Roblox hides it from public catalog search because the experience is rated <b>16+ or 17+</b>. Age-verified accounts can buy it normally; under-16 accounts will see a 404.
+            </div>
+            <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
+          `);
+          return;
+        }
+
+        // Creator's public games were scanned, and this pass is NOT attached to any public game -> Private Experience
+        if (scannedPublicGames && !matchedGame) {
+          showResult('invalid', `
+            ❌ <b>404 — PARENT EXPERIENCE IS PRIVATE</b><br>
+            <b>Name:</b> ${name} (${price} Robux)<br>
+            <b>Creator:</b> ${creator}
+            <div class="reason-box">
+              <b>What happened:</b> The pass is set to On-Sale, <b>but none of ${creator}'s public experiences own this pass</b>. Its parent experience is still set to <b>Private</b> or <b>Unpublished</b>, which causes a 404 Page Not Found.<br><br>
+              <b>Fix:</b> Open Creator Hub → publish the experience and set its visibility to <b>Public</b>.
+            </div>
+          `);
+          return;
+        }
+
+        // Fallback only if Roblox rate-limited the creator games endpoint
+        showResult('warning', `
+          ⚠️ <b>ON-SALE — COULD NOT VERIFY PARENT GAME</b><br>
           <b>Name:</b> ${name}<br>
           <b>Price:</b> ${price} Robux<br>
-          <b>Creator:</b> ${creator}<br>
+          <b>Creator:</b> ${creator}
+          <div class="reason-box">
+            <b>What happened:</b> Roblox's API rate-limited the experience lookup. Click below while logged into Roblox to check if the page loads or 404s:
+          </div>
           <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
         `);
       } catch (err) {
