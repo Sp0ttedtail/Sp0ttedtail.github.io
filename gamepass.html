@@ -148,7 +148,7 @@
 </head>
 <body>
   <div class="card">
-    <h2>Roblox Gamepass Checker</h2>
+    <h2>Gamepass Checker</h2>
     <input type="text" id="input" placeholder="Paste Gamepass URL or ID..." autocomplete="off" autocapitalize="off" spellcheck="false" />
     <button id="checkBtn" type="button">Verify Gamepass</button>
     <div id="result" role="status" aria-live="polite"></div>
@@ -396,69 +396,6 @@
       if (e.key === 'Enter') checkPass();
     });
   })();
-  </script>
-</body>
-</html>
-ed = false;
-      }
-    }
-
-    function showResult(state, html) {
-      const resBox = document.getElementById('result');
-      resBox.style.display = 'block';
-      resBox.className = state;
-      resBox.innerHTML = html;
-    }
-  </script>
-</body>
-</html>
->Creator:</b> ${creator}${gameLine}
-            <div class="reason-box">
-              <b>What happened:</b> The pass is <b>On-Sale</b> and its experience (<b>${matchedGame.name}</b>) is <b>Public</b>, but Roblox hides it from public catalog search because the experience is rated <b>16+ or 17+</b>. Age-verified accounts can buy it normally; under-16 accounts will see a 404.
-            </div>
-            <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
-          `);
-          return;
-        }
-
-        // Outcome 3: Explicitly marked unplayable/private OR not found in any of the creator's public games -> Private Experience (404)
-        if ((matchedGame && matchedGame.isPlayable === false) || (scannedPublicGames && !matchedGame)) {
-          showResult('invalid', `
-            ❌ <b>404 — PARENT EXPERIENCE IS PRIVATE</b><br>
-            <b>Name:</b> ${name} (${price} Robux)<br>
-            <b>Creator:</b> ${creator}${gameLine}
-            <div class="reason-box">
-              <b>What happened:</b> The pass is set to On-Sale, <b>but its parent experience is Private or Unpublished</b>, which causes a 404 Page Not Found for buyers.<br><br>
-              <b>Fix:</b> Open Creator Hub → publish the experience and set its visibility to <b>Public</b>.
-            </div>
-          `);
-          return;
-        }
-
-        // Outcome 4: Only reached if retries were exhausted
-        showResult('warning', `
-          ⚠️ <b>ON-SALE — RATE LIMIT EXCEEDED</b><br>
-          <b>Name:</b> ${name}<br>
-          <b>Price:</b> ${price} Robux<br>
-          <b>Creator:</b> ${creator}
-          <div class="reason-box">
-            <b>What happened:</b> Roblox's proxy stayed rate-limited after multiple retries. Wait a few seconds and click Verify again, or open the link below directly:
-          </div>
-          <a class="store-link" href="https://www.roblox.com/game-pass/${passId}" target="_blank" rel="noopener">Open Store Page →</a>
-        `);
-      } catch (err) {
-        showResult('invalid', `⚠️ <b>Request Error:</b> ${err.message}`);
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    function showResult(state, html) {
-      const resBox = document.getElementById('result');
-      resBox.style.display = 'block';
-      resBox.className = state;
-      resBox.innerHTML = html;
-    }
   </script>
 </body>
 </html>
